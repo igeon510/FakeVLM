@@ -1,8 +1,8 @@
 import math
 from typing import List, Dict, Optional
 
-from deepspeed import zero
-from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+# from deepspeed import zero
+# from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 
 import torch
 import torch.distributed as dist
@@ -133,12 +133,8 @@ def rank0_print(*args):
 
 
 def maybe_zero_3(param):
-    if hasattr(param, "ds_id"):
-        with zero.GatheredParameters([param]):
-            param = param.data.detach().cpu().clone()
-    else:
-        param = param.detach().cpu().clone()
-    return param
+    # Deepspeed ZeRO-3 not used
+    return param.detach().cpu().clone()
 
 
 # Borrowed from peft.utils.get_peft_model_state_dict

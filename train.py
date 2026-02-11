@@ -10,7 +10,7 @@ from accelerate.utils import DistributedType
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 import torch
 import transformers
-from transformers import Trainer, deepspeed
+from transformers import Trainer
 
 
 from arguments import ModelArguments, DataArguments, TrainingArguments, LoraArguments
@@ -30,6 +30,9 @@ def train():
     )
     model_args, data_args, training_args, lora_args = parser.parse_args_into_dataclasses()
 
+    training_args.deepspeed = None 
+    training_args.hf_deepspeed_config = None
+    
     # dumping arguments
     output_dir = getattr(training_args, 'output_dir', None)
     assert output_dir is not None, "output_dir is required"
@@ -41,24 +44,36 @@ def train():
     yaml.dump(asdict(lora_args), open(args_dir / "lora.yaml", "w"))
 
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
-    if getattr(training_args, 'deepspeed', None) and getattr(lora_args, 'q_lora', False):
-        training_args.distributed_state.distributed_type = DistributedType.DEEPSPEED
-
+    
+    # Single GPU setup - no DeepSpeed needed
     device_map = None
     if lora_args.q_lora:
         device_map = {"": int(os.environ.get("LOCAL_RANK") or 0)} if int(os.environ.get("WORLD_SIZE", 1)) != 1 else None
-        if len(training_args.fsdp) > 0 or deepspeed.is_deepspeed_zero3_enabled():
-            raise ValueError("FSDP or ZeRO3 are not incompatible with QLoRA.")
 
     # llm quantization config (for q-lora)
     bnb_config = None
     if lora_args.use_lora and lora_args.q_lora:
         from transformers import BitsAndBytesConfig
         rank0_print("Quantization for LLM enabled...")
+        
+        # Identify modules to skip from quantization (modules that will be fully fine-tuned)
+        skip_modules = []
+        if model_args.model_family_id in MODULE_KEYWORDS:
+            keys = MODULE_KEYWORDS[model_args.model_family_id]
+            # If training vision projector fully, skip quantization
+            if training_args.train_vision_projector:
+                skip_modules.extend(keys["vision_projector"])
+            # If training vision encoder fully (no LoRA), skip quantization
+            if training_args.train_vision_encoder and not lora_args.use_vision_lora:
+                skip_modules.extend(keys["vision_encoder"])
+        
+        rank0_print(f"Skipping quantization for: {skip_modules}")
+
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=compute_dtype,
             bnb_4bit_quant_type="nf4", 
+            llm_int8_skip_modules=skip_modules if skip_modules else None,
         )
     
     # load model, tokenizer, processor
@@ -159,7 +174,7 @@ def train():
     train_dataset = LazySupervisedDataset(
         data_path=data_args.data_path,
         image_folder=data_args.image_folder,
-        video_folder=data_args.video_folder,
+        # video_folder=data_args.video_folder,
         num_frames=data_args.num_frames,
         model_family_id=model_args.model_family_id,
         user_key=data_args.user_key,
@@ -169,7 +184,7 @@ def train():
         eval_dataset = LazySupervisedDataset(
             data_path=data_args.eval_data_path,
             image_folder=data_args.image_folder,
-            video_folder=data_args.video_folder,
+            # video_folder=data_args.video_folder,
             num_frames=data_args.num_frames,
             model_family_id=model_args.model_family_id,
             user_key=data_args.user_key,
