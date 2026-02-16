@@ -1,8 +1,10 @@
 import os
 os.environ["WANDB_PROJECT"]= "lmms-ft"
 from dataclasses import asdict
+import json
 import math
 from pathlib import Path
+import tempfile
 from typing import List, Optional
 import yaml
 
@@ -22,6 +24,58 @@ from utils import (
     rank0_print, find_all_linear_names, safe_save_model_for_hf_trainer,
     get_peft_state_maybe_zero_3, TrainerWithCustomSampler
 )
+
+def _prepare_qlora_compatible_adapter(adapter_ref: str) -> str:
+    """Create a temporary adapter directory that keeps only LoRA weights.
+
+    Some adapters include full-precision `modules_to_save` weights (e.g., projector),
+    which are incompatible with 4-bit QLoRA loading. This helper strips those entries.
+    """
+    adapter_dir = Path(adapter_ref)
+    if not adapter_dir.is_dir():
+        from huggingface_hub import snapshot_download
+        adapter_dir = Path(snapshot_download(repo_id=adapter_ref))
+
+    config_path = adapter_dir / "adapter_config.json"
+    if not config_path.exists():
+        return str(adapter_dir)
+
+    with config_path.open("r", encoding="utf-8") as f:
+        adapter_cfg = json.load(f)
+
+    modules_to_save = adapter_cfg.get("modules_to_save")
+    if not modules_to_save:
+        return str(adapter_dir)
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="qlora_adapter_"))
+    rank0_print(
+        "QLoRA mode detected: filtering adapter to LoRA-only weights. "
+        f"modules_to_save={modules_to_save}, tmp_dir={tmp_dir}"
+    )
+
+    adapter_cfg["modules_to_save"] = None
+    with (tmp_dir / "adapter_config.json").open("w", encoding="utf-8") as f:
+        json.dump(adapter_cfg, f, ensure_ascii=False, indent=2)
+
+    safetensor_path = adapter_dir / "adapter_model.safetensors"
+    bin_path = adapter_dir / "adapter_model.bin"
+
+    if safetensor_path.exists():
+        from safetensors.torch import load_file, save_file
+        state = load_file(str(safetensor_path))
+        filtered_state = {k: v for k, v in state.items() if "lora_" in k}
+        save_file(filtered_state, str(tmp_dir / "adapter_model.safetensors"))
+    elif bin_path.exists():
+        state = torch.load(str(bin_path), map_location="cpu")
+        filtered_state = {k: v for k, v in state.items() if "lora_" in k}
+        torch.save(filtered_state, str(tmp_dir / "adapter_model.bin"))
+    else:
+        raise FileNotFoundError(
+            f"No adapter weights found in {adapter_dir} "
+            "(expected adapter_model.safetensors or adapter_model.bin)"
+        )
+
+    return str(tmp_dir)
 
 
 def train():
@@ -136,9 +190,12 @@ def train():
         # This is useful for domain adaptation on top of a pretrained adapter.
         if lora_args.use_lora and lora_args.lora_weight_path:
             rank0_print(f"Loading LoRA adapter from: {lora_args.lora_weight_path}")
+            adapter_source = lora_args.lora_weight_path
+            if lora_args.q_lora:
+                adapter_source = _prepare_qlora_compatible_adapter(lora_args.lora_weight_path)
             model = PeftModel.from_pretrained(
                 model,
-                lora_args.lora_weight_path,
+                adapter_source,
                 is_trainable=True,
             )
             if len(full_modules) > 0:
