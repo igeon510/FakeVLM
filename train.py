@@ -7,7 +7,7 @@ from typing import List, Optional
 import yaml
 
 from accelerate.utils import DistributedType
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 import torch
 import transformers
 from transformers import Trainer, deepspeed
@@ -127,22 +127,36 @@ def train():
             rank0_print("Vision projector will be fully trained...")
             full_modules.extend(vision_projector_keys)
         
-        lora_config = LoraConfig(
-            r=lora_args.lora_r,
-            lora_alpha=lora_args.lora_alpha,
-            target_modules=lora_modules,
-            modules_to_save=full_modules,
-            lora_dropout=lora_args.lora_dropout,
-            bias=lora_args.lora_bias,
-            task_type="CAUSAL_LM",
-        )
-
         if lora_args.q_lora:
             model = prepare_model_for_kbit_training(
                 model, use_gradient_checkpointing=training_args.gradient_checkpointing
             )
-            
-        model = get_peft_model(model, lora_config)
+
+        # Continue from an existing LoRA adapter when provided.
+        # This is useful for domain adaptation on top of a pretrained adapter.
+        if lora_args.use_lora and lora_args.lora_weight_path:
+            rank0_print(f"Loading LoRA adapter from: {lora_args.lora_weight_path}")
+            model = PeftModel.from_pretrained(
+                model,
+                lora_args.lora_weight_path,
+                is_trainable=True,
+            )
+            if len(full_modules) > 0:
+                rank0_print(
+                    "Warning: full_modules are requested together with a pretrained adapter. "
+                    "These modules are not injected via a new LoRA config in this mode."
+                )
+        else:
+            lora_config = LoraConfig(
+                r=lora_args.lora_r,
+                lora_alpha=lora_args.lora_alpha,
+                target_modules=lora_modules,
+                modules_to_save=full_modules,
+                lora_dropout=lora_args.lora_dropout,
+                bias=lora_args.lora_bias,
+                task_type="CAUSAL_LM",
+            )
+            model = get_peft_model(model, lora_config)
 
     # for module in llm_keys:
     #     rank0_print(f"\t{module}")

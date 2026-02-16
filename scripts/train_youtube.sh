@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Final Youtube training script
+# Base: llava-1.5-7b-hf
+# Init adapter: igeon510/llava-1.5-7b-qlora
+#
 # Example:
+# CUDA_VISIBLE_DEVICES=0 \
+# NUM_GPUS=1 \
 # DATA_ROOT=playground/data \
 # TRAIN_DATA=playground/data/processed/train_sft.json \
 # EVAL_DATA=playground/data/processed/test_sft.json \
-# MODEL_ID=llava-1.5-7b \
-# RUN_ID=youtubefakevlm-lora \
+# RUN_ID=youtube-qlora-final \
 # bash scripts/train_youtube.sh
 
 NUM_GPUS=${NUM_GPUS:-1}
@@ -20,36 +25,49 @@ DISTRIBUTED_ARGS="
 "
 
 MODEL_ID=${MODEL_ID:-llava-1.5-7b}
+MODEL_LOCAL_PATH=${MODEL_LOCAL_PATH:-}
 DATA_ROOT=${DATA_ROOT:-playground/data}
-TRAIN_DATA=${TRAIN_DATA:-playground/data/processed/train_sft.json}
-EVAL_DATA=${EVAL_DATA:-playground/data/processed/test_sft.json}
+TRAIN_DATA=${TRAIN_DATA:-playground/data/processed/train.json}
+EVAL_DATA=${EVAL_DATA:-playground/data/processed/test.json}
 
-RUN_ID=${RUN_ID:-${MODEL_ID}-youtubefakevlm}
+RUN_ID=${RUN_ID:-${MODEL_ID}-youtube-qlora-from-fakevlm}
 DS_STAGE=${DS_STAGE:-zero2}
 
-NUM_EPOCHS=${NUM_EPOCHS:-3}
-PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-4}
+# Hyperparameters tuned for ~6k image domain adaptation
+NUM_EPOCHS=${NUM_EPOCHS:-4}
+PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-2}
 GRAD_ACCUM=${GRAD_ACCUM:-8}
-LR=${LR:-2e-5}
+LR=${LR:-5e-5}
+WARMUP_RATIO=${WARMUP_RATIO:-0.05}
 MODEL_MAX_LEN=${MODEL_MAX_LEN:-1024}
+WEIGHT_DECAY=${WEIGHT_DECAY:-0.0}
+LOGGING_STEPS=${LOGGING_STEPS:-10}
+SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-2}
+REPORT_TO=${REPORT_TO:-wandb}
+EVAL_STRATEGY=${EVAL_STRATEGY:-epoch}
 
-# Paper-like defaults for domain adaptation with LoRA rank=16
+# QLoRA + adapter initialization
 USE_LORA=${USE_LORA:-True}
-LORA_R=${LORA_R:-16}
-LORA_ALPHA=${LORA_ALPHA:-16}
-Q_LORA=${Q_LORA:-False}
+Q_LORA=${Q_LORA:-True}
+LORA_WEIGHT_PATH=${LORA_WEIGHT_PATH:-igeon510/llava-1.5-7b-qlora}
 
+# Keep vision modules frozen for stable, memory-efficient QLoRA adaptation
 TRAIN_VISION_ENCODER=${TRAIN_VISION_ENCODER:-False}
 USE_VISION_LORA=${USE_VISION_LORA:-False}
-TRAIN_VISION_PROJECTOR=${TRAIN_VISION_PROJECTOR:-True}
+TRAIN_VISION_PROJECTOR=${TRAIN_VISION_PROJECTOR:-False}
+
+# LoRA config is mainly used when starting from scratch; still exposed for override
+LORA_R=${LORA_R:-16}
+LORA_ALPHA=${LORA_ALPHA:-16}
 
 torchrun $DISTRIBUTED_ARGS train.py \
     --model_id "$MODEL_ID" \
+    --model_local_path "$MODEL_LOCAL_PATH" \
     --data_path "$TRAIN_DATA" \
     --eval_data_path "$EVAL_DATA" \
     --image_folder "$DATA_ROOT" \
     --output_dir "./checkpoints/${RUN_ID}" \
-    --report_to wandb \
+    --report_to "$REPORT_TO" \
     --run_name "$RUN_ID" \
     --deepspeed "./ds_configs/${DS_STAGE}.json" \
     --bf16 True \
@@ -57,14 +75,14 @@ torchrun $DISTRIBUTED_ARGS train.py \
     --per_device_train_batch_size "$PER_DEVICE_BATCH_SIZE" \
     --per_device_eval_batch_size "$PER_DEVICE_BATCH_SIZE" \
     --gradient_accumulation_steps "$GRAD_ACCUM" \
-    --eval_strategy "no" \
+    --eval_strategy "$EVAL_STRATEGY" \
     --save_strategy "epoch" \
-    --save_total_limit 1 \
+    --save_total_limit "$SAVE_TOTAL_LIMIT" \
     --learning_rate "$LR" \
-    --weight_decay 0. \
-    --warmup_ratio 0.03 \
+    --weight_decay "$WEIGHT_DECAY" \
+    --warmup_ratio "$WARMUP_RATIO" \
     --lr_scheduler_type "cosine" \
-    --logging_steps 10 \
+    --logging_steps "$LOGGING_STEPS" \
     --tf32 True \
     --model_max_length "$MODEL_MAX_LEN" \
     --gradient_checkpointing True \
@@ -74,5 +92,6 @@ torchrun $DISTRIBUTED_ARGS train.py \
     --train_vision_projector "$TRAIN_VISION_PROJECTOR" \
     --use_lora "$USE_LORA" \
     --q_lora "$Q_LORA" \
+    --lora_weight_path "$LORA_WEIGHT_PATH" \
     --lora_r "$LORA_R" \
     --lora_alpha "$LORA_ALPHA"
