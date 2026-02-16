@@ -125,6 +125,56 @@ Considering the size of the model and the magnitude of the data, we recommend us
 # change scripts/eval.py to scripts/eval_vllm.py in scripts/eval.sh
 bash scripts/eval.sh
 ```
+
+## YoutubeFakeClue Workflow (Custom Dataset)
+If your custom dataset looks like:
+
+```text
+playground
+└── data
+    ├── fake
+    ├── real
+    ├── train.json
+    └── test.json
+```
+
+you can prepare/train/evaluate with the scripts below.
+
+### 1. Convert metadata to FakeVLM format
+```bash
+python scripts/prepare_youtubefakeclue.py \
+  --dataset-root playground/data \
+  --train-json playground/data/train.json \
+  --test-json playground/data/test.json \
+  --output-dir playground/data/processed
+```
+
+Generated files:
+- `playground/data/processed/train_sft.json`
+- `playground/data/processed/test_sft.json`
+- `playground/data/processed/train_eval.json`
+- `playground/data/processed/test_eval.json`
+
+### 2. Fine-tune for Youtube domain
+```bash
+DATA_ROOT=playground/data \
+TRAIN_DATA=playground/data/processed/train_sft.json \
+EVAL_DATA=playground/data/processed/test_sft.json \
+RUN_ID=youtubefakevlm-lora \
+bash scripts/train_youtube.sh
+```
+
+### 3. Compare Our Model vs FakeVLM vs OpenAI API
+```bash
+OPENAI_API_KEY=YOUR_KEY \
+python scripts/eval_multimodel.py \
+  --test-json playground/data/processed/test_eval.json \
+  --image-root playground/data \
+  --our-model-path checkpoints/youtubefakevlm-lora \
+  --fakevlm-model-path lingcco/fakeVLM \
+  --openai-model chatgpt-5.2 \
+  --output-dir results/youtube_benchmark
+```
 ## 📊 Results
 Performance of 7 leading LMMs and FakeVLM on DD-VQA, Fake Clues and Loki.
 
