@@ -1,3 +1,14 @@
+"""
+python scripts/eval_multimodel.py \
+  --test-json playground/data/processed/test_eval.json \
+  --image-root playground/data \
+  --base-model-path llava-hf/llava-1.5-7b-hf \
+  --our-model-adapter-path checkpoints/youtube-qlora-final \
+  --fakevlm-adapter-path igeon510/llava-1.5-7b-qlora \
+  --openai-model chatgpt-5.2 \
+  --output-dir results/youtube_benchmark
+
+"""
 #!/usr/bin/env python3
 import argparse
 import base64
@@ -36,7 +47,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
 
     parser.add_argument("--our-model-path", type=str, default=None)
+    parser.add_argument("--our-model-adapter-path", type=str, default=None)
     parser.add_argument("--fakevlm-model-path", type=str, default=None)
+    parser.add_argument("--fakevlm-adapter-path", type=str, default=None)
+    parser.add_argument("--base-model-path", type=str, default="llava-hf/llava-1.5-7b-hf")
     parser.add_argument("--processor-path", type=str, default="llava-hf/llava-1.5-7b-hf")
 
     parser.add_argument("--openai-model", type=str, default=None)
@@ -157,6 +171,7 @@ def compute_metrics(labels: List[int], preds: List[int], unknown: int) -> Dict[s
 
 def infer_with_local_model(
     model_path: str,
+    adapter_path: Optional[str],
     processor_path: str,
     samples: List[Sample],
     device: str,
@@ -164,6 +179,7 @@ def infer_with_local_model(
     temperature: float,
 ) -> List[Dict[str, Any]]:
     from transformers import AutoProcessor, LlavaForConditionalGeneration
+    from peft import PeftModel
 
     torch_dtype = torch.bfloat16 if torch.cuda.is_available() and device.startswith("cuda") else torch.float32
     model = LlavaForConditionalGeneration.from_pretrained(
@@ -171,6 +187,8 @@ def infer_with_local_model(
         torch_dtype=torch_dtype,
         low_cpu_mem_usage=True,
     )
+    if adapter_path:
+        model = PeftModel.from_pretrained(model, adapter_path)
     processor = AutoProcessor.from_pretrained(processor_path)
     model = model.to(device)
     model.eval()
@@ -324,9 +342,11 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     evaluations: List[Tuple[str, List[Dict[str, Any]]]] = []
-    if args.our_model_path:
+    if args.our_model_path or args.our_model_adapter_path:
+        our_model_base = args.our_model_path or args.base_model_path
         rows = infer_with_local_model(
-            model_path=args.our_model_path,
+            model_path=our_model_base,
+            adapter_path=args.our_model_adapter_path,
             processor_path=args.processor_path,
             samples=samples,
             device=args.device,
@@ -335,9 +355,11 @@ def main() -> None:
         )
         evaluations.append(("our_model", rows))
 
-    if args.fakevlm_model_path:
+    if args.fakevlm_model_path or args.fakevlm_adapter_path:
+        fakevlm_model_base = args.fakevlm_model_path or args.base_model_path
         rows = infer_with_local_model(
-            model_path=args.fakevlm_model_path,
+            model_path=fakevlm_model_base,
+            adapter_path=args.fakevlm_adapter_path,
             processor_path=args.processor_path,
             samples=samples,
             device=args.device,
@@ -361,7 +383,12 @@ def main() -> None:
         evaluations.append((f"openai_{args.openai_model}", rows))
 
     if not evaluations:
-        raise ValueError("No model selected. Set at least one of --our-model-path, --fakevlm-model-path, --openai-model")
+        raise ValueError(
+            "No model selected. Set at least one of "
+            "--our-model-path/--our-model-adapter-path, "
+            "--fakevlm-model-path/--fakevlm-adapter-path, "
+            "--openai-model"
+        )
 
     summary: Dict[str, Any] = {}
     for model_name, rows in evaluations:
